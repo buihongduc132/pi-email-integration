@@ -75,6 +75,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "better-sqlite3": "^12.10.0"
+    "better-sqlite3": "^12.10.0",
+    "ioredis": "^5.6.1"
   }
 }
