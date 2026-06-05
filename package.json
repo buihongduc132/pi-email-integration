@@ -1,0 +1,80 @@
+{
+  "name": "@buihongduc132/pi-email-integration",
+  "version": "0.1.0",
+  "description": "Pi extension: Email integration for multi-agent systems — local mail server + origin tracking + Hindsight hooks. Real mail adapters (Gmail, Outlook, etc.) deferred to future releases.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "pi-coding-agent",
+    "email",
+    "mail",
+    "agent-communication",
+    "hindsight",
+    "origin-tracking"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "author": "buihongduc132",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/buihongduc132/pi-email-integration.git"
+  },
+  "homepage": "https://github.com/buihongduc132/pi-email-integration#readme",
+  "bugs": {
+    "url": "https://github.com/buihongduc132/pi-email-integration/issues"
+  },
+  "files": [
+    "extensions/**/*.ts",
+    "!extensions/**/*.test.ts",
+    "src/**/*.ts",
+    "src/**/*.sql",
+    "!src/**/*.test.ts",
+    "skills/**/*",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.1",
+    "@vitest/coverage-v8": "^4.1.5",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test:coverage",
+    "smoke-test": "node --experimental-strip-types scripts/smoke-test.ts",
+    "prepublishOnly": "npm run check",
+    "release:patch": "npm version patch -m 'release: v%s'",
+    "release:minor": "npm version minor -m 'release: v%s'",
+    "release:major": "npm version major -m 'release: v%s'"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
+  }
+}

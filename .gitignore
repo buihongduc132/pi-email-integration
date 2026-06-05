@@ -1,0 +1,23 @@
+node_modules/
+dist/
+*.js
+*.d.ts
+*.js.map
+!vitest.config.ts
+coverage/
+.env
+
+# ast-grep / coding-guard local artifacts
+.sg-rules/
+.sg-sha
+.sgignore
+sgconfig.yml
+sg-reports/
+
+# GitNexus local index
+.gitnexus/
+.gitnexusignore
+
+# IDE
+.idea/
+.vscode/
