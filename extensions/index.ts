@@ -116,6 +116,27 @@ export default function (pi: ExtensionAPI): void {
       if (routing.routed) fireHook({ event: "email:routed", email, timestamp: new Date(), routing: { bank: routing.bank ?? "default", tags: routing.tags, matchedRule: routing.matchedRuleId } });
       fireHook({ event: "email:sent", email, timestamp: new Date(), routing: routing.routed ? { bank: routing.bank ?? "default", tags: routing.tags, matchedRule: routing.matchedRuleId } : undefined });
 
+      // Wire to bus — publish notification for each recipient after successful send (S6)
+      const allRecipients = [...email.to, ...(email.cc ?? []), ...(email.bcc ?? [])];
+      for (const recipient of allRecipients) {
+        const channel = `email:inbox:${recipient.address.toLowerCase()}`;
+        bus.publish(channel, {
+          type: "email:received",
+          messageId: email.id,
+          subject: email.subject,
+          from: email.from.address,
+          body: email.body.substring(0, 500),
+          origin: {
+            cwd: email.origin.cwd,
+            agent: email.origin.cliAgent,
+            session: email.origin.sessionId,
+            gitProject: email.origin.gitProject,
+          },
+        }).catch(() => {
+          // Bus publish failed — graceful degradation
+        });
+      }
+
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ success: true, messageId: result.messageId, threadId: result.threadId, action: result.action, origin: { cwd: origin.cwd, agent: origin.cliAgent, gitProject: origin.gitProject } }) }],
         details: { success: true, messageId: result.messageId, threadId: result.threadId, action: result.action },
@@ -196,13 +217,13 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "email_subscribe",
     label: "Email Subscribe",
-    description: "Subscribe this session to a mailbox. You'll receive intercom notifications when emails arrive.",
+    description: "Subscribe this session to a mailbox. You'll receive bus notifications when emails arrive.",
     promptSnippet: "email_subscribe — subscribe to mailbox notifications",
     parameters: {
       type: "object",
       properties: {
         mailbox: { type: "string", description: "Mailbox address to subscribe to (default: your session name)" },
-        sessionName: { type: "string", description: "Your intercom session name (auto-detected from PI_SESSION_NAME)" },
+        sessionName: { type: "string", description: "Your session name (auto-detected from PI_SESSION_NAME)" },
       },
     },
     async execute(_toolCallId, params) {

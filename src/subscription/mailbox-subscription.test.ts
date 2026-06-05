@@ -165,8 +165,8 @@ describe("MailboxSubscription — bus.subscribe on subscription", () => {
 
 // ─── Tests: Hook → Bus Publish ──────────────────────────────────
 
-describe("MailboxSubscription — createReceivedHandler publishes to bus", () => {
-  it("publishes to bus for each recipient with a subscription", async () => {
+describe("MailboxSubscription — hook handler is no-op (bus publish is in email_send)", () => {
+  it("createReceivedHandler does not publish to bus (S6 handles that)", () => {
     const bus = makeMockBus();
     const sub = new MailboxSubscription(bus, makeMockPi());
     sub.subscribe("alice@local", "session-a");
@@ -174,17 +174,11 @@ describe("MailboxSubscription — createReceivedHandler publishes to bus", () =>
     const handler = sub.createReceivedHandler();
     handler(makeContext());
 
-    expect(bus.publish).toHaveBeenCalledTimes(1);
-    // Check channel
-    const [channel, payload] = (bus.publish as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(channel).toBe("email:inbox:alice@local");
-    expect(payload.type).toBe("email:received");
-    expect(payload.messageId).toBe("em-1");
-    expect(payload.subject).toBe("Test Subject");
-    expect(payload.from).toBe("sender@local");
+    // Hook handler no longer publishes — email_send does
+    expect(bus.publish).not.toHaveBeenCalled();
   });
 
-  it("skips non-received events", () => {
+  it("hook handler still skips non-received events without error", () => {
     const bus = makeMockBus();
     const sub = new MailboxSubscription(bus, makeMockPi());
     sub.subscribe("alice@local", "session-a");
@@ -193,54 +187,6 @@ describe("MailboxSubscription — createReceivedHandler publishes to bus", () =>
     handler(makeContext({ event: "email:sent" }));
 
     expect(bus.publish).not.toHaveBeenCalled();
-  });
-
-  it("publishes for multiple recipients across to/cc/bcc", async () => {
-    const bus = makeMockBus();
-    const sub = new MailboxSubscription(bus, makeMockPi());
-    sub.subscribe("alice@local", "session-a");
-    sub.subscribe("bob@local", "session-b");
-
-    const handler = sub.createReceivedHandler();
-    handler(makeContext({
-      email: makeEmail({
-        to: [{ address: "alice@local" }],
-        cc: [{ address: "bob@local" }],
-      }),
-    }));
-
-    expect(bus.publish).toHaveBeenCalledTimes(2);
-    const channels = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.map(
-      (c: [string, unknown]) => c[0],
-    );
-    expect(channels).toContain("email:inbox:alice@local");
-    expect(channels).toContain("email:inbox:bob@local");
-  });
-
-  it("does not publish for unsubscribed recipients", () => {
-    const bus = makeMockBus();
-    const sub = new MailboxSubscription(bus, makeMockPi());
-
-    const handler = sub.createReceivedHandler();
-    handler(makeContext());
-
-    // No subscriptions registered → no publishes
-    expect(bus.publish).not.toHaveBeenCalled();
-  });
-
-  it("applies filter — filter returns false, no publish for that sub", async () => {
-    const bus = makeMockBus();
-    const pi = makeMockPi();
-    const sub = new MailboxSubscription(bus, pi);
-    const filter = vi.fn().mockReturnValue(false);
-    sub.subscribe("alice@local", "session-a", filter);
-
-    const handler = sub.createReceivedHandler();
-    handler(makeContext());
-
-    // Filter blocked → still publishes to bus (other subscribers may exist)
-    // but the bus handler won't inject to this session
-    expect(filter).toHaveBeenCalled();
   });
 });
 
@@ -318,7 +264,7 @@ describe("MailboxSubscription — graceful degradation", () => {
     expect(() => handler(makeContext())).not.toThrow();
   });
 
-  it("works without pi context — bus publish still fires", async () => {
+  it("works without pi context — hook handler is no-op", () => {
     const bus = makeMockBus();
     const sub = new MailboxSubscription(bus, null as unknown as PiContext);
     sub.subscribe("alice@local", "session-a");
@@ -326,17 +272,18 @@ describe("MailboxSubscription — graceful degradation", () => {
     const handler = sub.createReceivedHandler();
     handler(makeContext());
 
-    expect(bus.publish).toHaveBeenCalledTimes(1);
+    // Hook handler no longer publishes — email_send does
+    expect(bus.publish).not.toHaveBeenCalled();
   });
 
-  it("bus.publish failure does not crash handler", async () => {
+  it("bus.publish failure does not crash handler (no-op)", () => {
     const bus = makeMockBus();
     (bus.publish as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Redis down"));
     const sub = new MailboxSubscription(bus, makeMockPi());
     sub.subscribe("alice@local", "session-a");
 
     const handler = sub.createReceivedHandler();
-    // Should not throw even though publish fails
+    // Hook handler is now no-op, won't trigger publish
     expect(() => handler(makeContext())).not.toThrow();
   });
 });

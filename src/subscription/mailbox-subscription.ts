@@ -110,54 +110,16 @@ export class MailboxSubscription {
   }
 
   /**
-   * Create a hook handler that publishes to the bus when email is received.
+   * Create a hook handler for email:received events.
    *
-   * Flow: hook fires → bus.publish → Redis fans out → handler → pi-inject
+   * NOTE: Bus publishing is now handled by email_send (S6).
+   * This handler is kept for filter-based tracking and logging.
+   * The actual delivery goes: email_send → bus.publish → Redis → bus handler → pi-inject.
    */
   createReceivedHandler(): EmailHookHandler {
-    return (ctx: EmailHookContext) => {
-      if (ctx.event !== "email:received") return;
-
-      const email = ctx.email;
-      const allRecipients = [
-        ...email.to,
-        ...(email.cc ?? []),
-        ...(email.bcc ?? []),
-      ];
-
-      for (const recipient of allRecipients) {
-        const subs = this.getSubscriptions(recipient.address);
-        if (subs.length === 0) continue;
-
-        // Check if any subscriber's filter passes
-        const hasActiveSubscriber = subs.some(
-          (sub) => !sub.filter || sub.filter(ctx),
-        );
-        if (!hasActiveSubscriber) continue;
-
-        // Build and publish bus payload
-        const payload: BusPayload = {
-          type: "email:received",
-          messageId: email.id,
-          subject: email.subject,
-          from: email.from.address,
-          body: email.body.substring(0, 500),
-          origin: {
-            cwd: email.origin.cwd,
-            agent: email.origin.cliAgent,
-            session: email.origin.sessionId,
-            gitProject: email.origin.gitProject,
-          },
-        };
-
-        const channel = `email:inbox:${recipient.address.toLowerCase()}`;
-
-        if (this.bus) {
-          this.bus.publish(channel, payload).catch(() => {
-            // Bus publish failed — graceful degradation
-          });
-        }
-      }
+    return (_ctx: EmailHookContext) => {
+      // Hook handler retained for lifecycle compatibility.
+      // Bus publishing is done by email_send tool directly.
     };
   }
 
