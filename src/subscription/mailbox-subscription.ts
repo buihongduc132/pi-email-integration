@@ -1,23 +1,23 @@
 /**
- * Mailbox Subscription — push notification via intercom.
+ * Mailbox Subscription — bus-based push notification.
  *
- * A session subscribes to a mailbox (default: its session name/ID).
- * When an email lands in that mailbox, the subscription handler sends
- * an intercom message to the subscribed session — invoking a real turn
- * (not silent).
+ * A session subscribes to a mailbox. When an email lands in that mailbox:
+ *   hook fires → bus.publish("email:inbox:{mailbox}", payload) →
+ *   Redis fans out → subscriber handler → pi.sendMessage({ triggerTurn: true })
  *
- * Usage:
- *   const sub = new MailboxSubscription();
- *   sub.subscribe("alice@local", "my-session-name");
- *   // When email arrives for alice@local → intercom "send" to "my-session-name"
+ * The old intercom-based delivery code has been completely removed.
+ * Delivery now goes through the Redis message bus.
  */
 
 import type { EmailHookContext, EmailHookHandler } from "../types.js";
+import type { MessageBus, BusPayload } from "../pubsub/bus.js";
+import type { PiContext } from "../delivery/pi-inject.js";
+import { injectEmailMessage } from "../delivery/pi-inject.js";
 
 export interface Subscription {
   /** Mailbox address to watch */
   mailbox: string;
-  /** Intercom session name to notify */
+  /** Session name to notify */
   sessionName: string;
   /** Optional filter: only notify if condition matches */
   filter?: (ctx: EmailHookContext) => boolean;
@@ -25,20 +25,46 @@ export interface Subscription {
 
 export class MailboxSubscription {
   private readonly subscriptions = new Map<string, Subscription[]>();
+  /** Track which channels we've already subscribed to on the bus */
+  private readonly busChannels = new Set<string>();
+  private readonly bus: MessageBus | null;
+  private readonly pi: PiContext | null;
+
+  constructor(bus: MessageBus | null, pi: PiContext | null) {
+    this.bus = bus;
+    this.pi = pi;
+  }
 
   /**
    * Subscribe a session to a mailbox.
-   * When email arrives at mailbox, intercom sends to sessionName.
+   * Registers a bus handler that calls pi-inject when messages arrive.
    */
-  subscribe(mailbox: string, sessionName: string, filter?: (ctx: EmailHookContext) => boolean): void {
+  subscribe(
+    mailbox: string,
+    sessionName: string,
+    filter?: (ctx: EmailHookContext) => boolean,
+  ): void {
     const key = mailbox.toLowerCase();
     const existing = this.subscriptions.get(key) ?? [];
+
     // Avoid duplicate subscriptions
     if (existing.some((s) => s.sessionName === sessionName)) {
       return;
     }
+
     existing.push({ mailbox: key, sessionName, filter });
     this.subscriptions.set(key, existing);
+
+    // Register bus subscription for this channel (once per channel)
+    const busChannel = `email:inbox:${key}`;
+    if (!this.busChannels.has(busChannel) && this.bus) {
+      this.busChannels.add(busChannel);
+      this.bus.subscribe(busChannel, (channel: string, payload: BusPayload) => {
+        this.handleBusMessage(channel, payload);
+      }).catch(() => {
+        // Bus subscription failed — graceful degradation
+      });
+    }
   }
 
   /**
@@ -48,9 +74,18 @@ export class MailboxSubscription {
     const key = mailbox.toLowerCase();
     const existing = this.subscriptions.get(key);
     if (!existing) return;
+
     const filtered = existing.filter((s) => s.sessionName !== sessionName);
     if (filtered.length === 0) {
       this.subscriptions.delete(key);
+      // Unsubscribe from bus if no more subscribers for this mailbox
+      const busChannel = `email:inbox:${key}`;
+      if (this.busChannels.has(busChannel) && this.bus) {
+        this.busChannels.delete(busChannel);
+        this.bus.unsubscribe(busChannel).catch(() => {
+          // Bus unsubscribe failed — graceful degradation
+        });
+      }
     } else {
       this.subscriptions.set(key, filtered);
     }
@@ -75,11 +110,9 @@ export class MailboxSubscription {
   }
 
   /**
-   * Create a hook handler that checks subscriptions and sends intercom messages.
+   * Create a hook handler that publishes to the bus when email is received.
    *
-   * This is the "push notification" mechanism — when email:received fires,
-   * this handler checks if the recipient's mailbox has subscribers and sends
-   * an intercom message to each, invoking a real turn.
+   * Flow: hook fires → bus.publish → Redis fans out → handler → pi-inject
    */
   createReceivedHandler(): EmailHookHandler {
     return (ctx: EmailHookContext) => {
@@ -94,49 +127,55 @@ export class MailboxSubscription {
 
       for (const recipient of allRecipients) {
         const subs = this.getSubscriptions(recipient.address);
-        for (const sub of subs) {
-          // Apply filter if present
-          if (sub.filter && !sub.filter(ctx)) continue;
+        if (subs.length === 0) continue;
 
-          // Build notification payload
-          const notification = {
-            type: "email-notification",
-            mailbox: recipient.address,
-            email: {
-              id: email.id,
-              threadId: email.threadId,
-              action: email.action,
-              from: email.from.address,
-              subject: email.subject,
-              body: email.body.substring(0, 500),
-              date: email.date.toISOString(),
-              origin: {
-                cwd: email.origin.cwd,
-                agent: email.origin.cliAgent,
-                session: email.origin.sessionId,
-                gitProject: email.origin.gitProject,
-              },
-            },
-          };
+        // Check if any subscriber's filter passes
+        const hasActiveSubscriber = subs.some(
+          (sub) => !sub.filter || sub.filter(ctx),
+        );
+        if (!hasActiveSubscriber) continue;
 
-          // Use intercom to send — this invokes a real turn in the target session
-          // The import is deferred to avoid circular deps at module level
-          try {
-            // Dynamic require — avoids compile-time dependency
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const piIntercom = require("pi-intercom");
-            if (typeof piIntercom?.intercom === "function") {
-              piIntercom.intercom({
-                action: "send",
-                to: sub.sessionName,
-                message: `📧 New email in ${recipient.address}:\n${JSON.stringify(notification, null, 2)}`,
-              });
-            }
-          } catch {
-            // Intercom not available (e.g. test environment) — skip silently
-          }
+        // Build and publish bus payload
+        const payload: BusPayload = {
+          type: "email:received",
+          messageId: email.id,
+          subject: email.subject,
+          from: email.from.address,
+          body: email.body.substring(0, 500),
+          origin: {
+            cwd: email.origin.cwd,
+            agent: email.origin.cliAgent,
+            session: email.origin.sessionId,
+            gitProject: email.origin.gitProject,
+          },
+        };
+
+        const channel = `email:inbox:${recipient.address.toLowerCase()}`;
+
+        if (this.bus) {
+          this.bus.publish(channel, payload).catch(() => {
+            // Bus publish failed — graceful degradation
+          });
         }
       }
     };
+  }
+
+  /**
+   * Handle a bus message — inject into pi session for each matching subscriber.
+   */
+  private async handleBusMessage(channel: string, payload: BusPayload): Promise<void> {
+    if (!this.pi) return;
+
+    // Extract mailbox from channel: "email:inbox:{mailbox}"
+    const mailbox = channel.replace("email:inbox:", "");
+    const subs = this.getSubscriptions(mailbox);
+
+    for (const sub of subs) {
+      // Best-effort injection for each subscriber
+      await injectEmailMessage(this.pi, channel, payload).catch(() => {
+        // Injection failed — skip this subscriber
+      });
+    }
   }
 }

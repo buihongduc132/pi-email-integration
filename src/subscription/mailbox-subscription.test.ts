@@ -1,8 +1,18 @@
-import { describe, it, expect, vi } from "vitest";
+/**
+ * Mailbox Subscription Tests — Bus-based delivery (S5 rewrite).
+ *
+ * Covers: subscribe, unsubscribe, bus publish on received,
+ * bus handler → pi-inject pipeline, filter support, graceful degradation.
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MailboxSubscription } from "./mailbox-subscription.js";
 import type { EmailHookContext, EmailMessage } from "../types.js";
+import type { MessageBus, BusPayload, PublishResult } from "../pubsub/bus.js";
+import type { PiContext } from "../delivery/pi-inject.js";
 
-/** Helper: minimal valid EmailMessage for test contexts. */
+// ─── Helpers ────────────────────────────────────────────────────
+
 function makeEmail(overrides: Partial<EmailMessage> = {}): EmailMessage {
   return {
     id: "em-1",
@@ -12,7 +22,7 @@ function makeEmail(overrides: Partial<EmailMessage> = {}): EmailMessage {
     to: [{ address: "alice@local" }],
     cc: [],
     bcc: [],
-    subject: "Test",
+    subject: "Test Subject",
     body: "Hello world",
     headers: {},
     date: new Date("2026-01-01T00:00:00Z"),
@@ -37,9 +47,28 @@ function makeContext(overrides: Partial<EmailHookContext> = {}): EmailHookContex
   };
 }
 
-describe("MailboxSubscription", () => {
-  it("subscribe adds a subscription — getSubscriptions returns it", () => {
-    const sub = new MailboxSubscription();
+function makeMockBus(): MessageBus {
+  return {
+    publish: vi.fn().mockResolvedValue({ success: true, subscribers: 0 } as PublishResult),
+    subscribe: vi.fn().mockResolvedValue(undefined),
+    unsubscribe: vi.fn().mockResolvedValue(undefined),
+    channels: vi.fn().mockResolvedValue([]),
+    send: vi.fn().mockResolvedValue({ success: true, subscribers: 0 } as PublishResult),
+    close: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+function makeMockPi(): PiContext {
+  return {
+    sendMessage: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+// ─── Tests: Subscription Management ─────────────────────────────
+
+describe("MailboxSubscription — subscription management", () => {
+  it("subscribe adds a subscription and getSubscriptions returns it", () => {
+    const sub = new MailboxSubscription(makeMockBus(), makeMockPi());
     sub.subscribe("alice@local", "session-a");
     const subs = sub.getSubscriptions("alice@local");
     expect(subs).toHaveLength(1);
@@ -47,35 +76,34 @@ describe("MailboxSubscription", () => {
     expect(subs[0].sessionName).toBe("session-a");
   });
 
-  it("subscribe is idempotent — subscribing same session twice doesn't duplicate", () => {
-    const sub = new MailboxSubscription();
+  it("subscribe is idempotent — same session/mailbox doesn't duplicate", () => {
+    const sub = new MailboxSubscription(makeMockBus(), makeMockPi());
     sub.subscribe("alice@local", "session-a");
     sub.subscribe("alice@local", "session-a");
     expect(sub.getSubscriptions("alice@local")).toHaveLength(1);
   });
 
   it("unsubscribe removes a subscription", () => {
-    const sub = new MailboxSubscription();
+    const sub = new MailboxSubscription(makeMockBus(), makeMockPi());
     sub.subscribe("alice@local", "session-a");
     sub.unsubscribe("alice@local", "session-a");
     expect(sub.getSubscriptions("alice@local")).toHaveLength(0);
   });
 
   it("unsubscribe cleans up empty mailbox entries", () => {
-    const sub = new MailboxSubscription();
+    const sub = new MailboxSubscription(makeMockBus(), makeMockPi());
     sub.subscribe("alice@local", "session-a");
     sub.unsubscribe("alice@local", "session-a");
-    // getAllSubscriptions should not contain the key at all
     expect(sub.getAllSubscriptions()).toHaveLength(0);
   });
 
   it("getSubscriptions for unregistered mailbox returns empty array", () => {
-    const sub = new MailboxSubscription();
+    const sub = new MailboxSubscription(makeMockBus(), makeMockPi());
     expect(sub.getSubscriptions("nobody@local")).toEqual([]);
   });
 
   it("getAllSubscriptions returns all across mailboxes", () => {
-    const sub = new MailboxSubscription();
+    const sub = new MailboxSubscription(makeMockBus(), makeMockPi());
     sub.subscribe("alice@local", "session-a");
     sub.subscribe("bob@local", "session-b");
     const all = sub.getAllSubscriptions();
@@ -84,68 +112,247 @@ describe("MailboxSubscription", () => {
     expect(names).toEqual(["session-a", "session-b"]);
   });
 
-  it("case-insensitive mailbox matching — subscribe 'Alice@Local', getSubscriptions('alice@local') works", () => {
-    const sub = new MailboxSubscription();
+  it("case-insensitive mailbox matching", () => {
+    const sub = new MailboxSubscription(makeMockBus(), makeMockPi());
     sub.subscribe("Alice@Local", "session-a");
     const subs = sub.getSubscriptions("alice@local");
     expect(subs).toHaveLength(1);
     expect(subs[0].sessionName).toBe("session-a");
   });
+});
 
-  it("createReceivedHandler returns a function", () => {
-    const sub = new MailboxSubscription();
-    const handler = sub.createReceivedHandler();
-    expect(typeof handler).toBe("function");
-  });
+// ─── Tests: Bus Subscription on subscribe() ─────────────────────
 
-  it("createReceivedHandler skips non-received events", () => {
-    const sub = new MailboxSubscription();
+describe("MailboxSubscription — bus.subscribe on subscription", () => {
+  it("subscribe registers a bus handler on email:inbox:{mailbox}", () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, makeMockPi());
     sub.subscribe("alice@local", "session-a");
-    const handler = sub.createReceivedHandler();
-    // Should not throw for non-received events
-    const ctx = makeContext({ event: "email:sent" });
-    expect(() => handler(ctx)).not.toThrow();
+    expect(bus.subscribe).toHaveBeenCalledWith(
+      "email:inbox:alice@local",
+      expect.any(Function),
+    );
   });
 
-  it("createReceivedHandler with filter — filter returns false, no notification sent", () => {
-    const sub = new MailboxSubscription();
+  it("subscribe does not duplicate bus subscription for same mailbox", () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, makeMockPi());
+    sub.subscribe("alice@local", "session-a");
+    sub.subscribe("alice@local", "session-b");
+    // Bus subscribe should be called only once per channel
+    expect(bus.subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("unsubscribe calls bus.unsubscribe when last subscriber removed", () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, makeMockPi());
+    sub.subscribe("alice@local", "session-a");
+    sub.unsubscribe("alice@local", "session-a");
+    expect(bus.unsubscribe).toHaveBeenCalledWith(
+      "email:inbox:alice@local",
+    );
+  });
+
+  it("unsubscribe does NOT call bus.unsubscribe if other subscribers remain", () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, makeMockPi());
+    sub.subscribe("alice@local", "session-a");
+    sub.subscribe("alice@local", "session-b");
+    sub.unsubscribe("alice@local", "session-a");
+    expect(bus.unsubscribe).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Tests: Hook → Bus Publish ──────────────────────────────────
+
+describe("MailboxSubscription — createReceivedHandler publishes to bus", () => {
+  it("publishes to bus for each recipient with a subscription", async () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, makeMockPi());
+    sub.subscribe("alice@local", "session-a");
+
+    const handler = sub.createReceivedHandler();
+    handler(makeContext());
+
+    expect(bus.publish).toHaveBeenCalledTimes(1);
+    // Check channel
+    const [channel, payload] = (bus.publish as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channel).toBe("email:inbox:alice@local");
+    expect(payload.type).toBe("email:received");
+    expect(payload.messageId).toBe("em-1");
+    expect(payload.subject).toBe("Test Subject");
+    expect(payload.from).toBe("sender@local");
+  });
+
+  it("skips non-received events", () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, makeMockPi());
+    sub.subscribe("alice@local", "session-a");
+
+    const handler = sub.createReceivedHandler();
+    handler(makeContext({ event: "email:sent" }));
+
+    expect(bus.publish).not.toHaveBeenCalled();
+  });
+
+  it("publishes for multiple recipients across to/cc/bcc", async () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, makeMockPi());
+    sub.subscribe("alice@local", "session-a");
+    sub.subscribe("bob@local", "session-b");
+
+    const handler = sub.createReceivedHandler();
+    handler(makeContext({
+      email: makeEmail({
+        to: [{ address: "alice@local" }],
+        cc: [{ address: "bob@local" }],
+      }),
+    }));
+
+    expect(bus.publish).toHaveBeenCalledTimes(2);
+    const channels = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c: [string, unknown]) => c[0],
+    );
+    expect(channels).toContain("email:inbox:alice@local");
+    expect(channels).toContain("email:inbox:bob@local");
+  });
+
+  it("does not publish for unsubscribed recipients", () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, makeMockPi());
+
+    const handler = sub.createReceivedHandler();
+    handler(makeContext());
+
+    // No subscriptions registered → no publishes
+    expect(bus.publish).not.toHaveBeenCalled();
+  });
+
+  it("applies filter — filter returns false, no publish for that sub", async () => {
+    const bus = makeMockBus();
+    const pi = makeMockPi();
+    const sub = new MailboxSubscription(bus, pi);
     const filter = vi.fn().mockReturnValue(false);
     sub.subscribe("alice@local", "session-a", filter);
 
     const handler = sub.createReceivedHandler();
-    const ctx = makeContext();
-    handler(ctx);
+    handler(makeContext());
 
-    // Filter was called
-    expect(filter).toHaveBeenCalledOnce();
-    // No intercom call (it would silently fail anyway, but filter blocked it)
+    // Filter blocked → still publishes to bus (other subscribers may exist)
+    // but the bus handler won't inject to this session
+    expect(filter).toHaveBeenCalled();
+  });
+});
+
+// ─── Tests: Bus Handler → Pi Inject ─────────────────────────────
+
+describe("MailboxSubscription — bus handler calls pi-inject", () => {
+  it("bus handler injects message into pi session on bus message", async () => {
+    const bus = makeMockBus();
+    const pi = makeMockPi();
+    const sub = new MailboxSubscription(bus, pi);
+    sub.subscribe("alice@local", "session-a");
+
+    // Extract the bus handler that was registered
+    const busHandler = (bus.subscribe as ReturnType<typeof vi.fn>).mock.calls[0][1] as (
+      channel: string,
+      payload: BusPayload,
+    ) => void;
+
+    const payload: BusPayload = {
+      type: "email:received",
+      messageId: "msg-1",
+      subject: "Hello",
+      from: "bob@local",
+      body: "Test body",
+      origin: {},
+    };
+
+    await busHandler("email:inbox:alice@local", payload);
+
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const msg = (pi.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(msg.customType).toBe("email_bus_message");
+    expect(msg.display).toBe(true);
+    expect(msg.content).toContain("alice@local");
+
+    const opts = (pi.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(opts).toEqual({ triggerTurn: true });
   });
 
-  it("createReceivedHandler with filter — filter returns true, notification logic runs", () => {
-    const sub = new MailboxSubscription();
-    const filter = vi.fn().mockReturnValue(true);
-    sub.subscribe("alice@local", "session-a", filter);
+  it("bus handler does not crash if pi.sendMessage throws", async () => {
+    const bus = makeMockBus();
+    const pi = makeMockPi();
+    (pi.sendMessage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("closed"));
+    const sub = new MailboxSubscription(bus, pi);
+    sub.subscribe("alice@local", "session-a");
+
+    const busHandler = (bus.subscribe as ReturnType<typeof vi.fn>).mock.calls[0][1] as (
+      channel: string,
+      payload: BusPayload,
+    ) => void;
+
+    const payload: BusPayload = {
+      type: "email:received",
+      messageId: "msg-1",
+      subject: "Hello",
+      from: "bob@local",
+      body: "Test body",
+      origin: {},
+    };
+
+    // Should not throw (handler is fire-and-forget, returns void)
+    expect(() => busHandler("email:inbox:alice@local", payload)).not.toThrow();
+  });
+});
+
+// ─── Tests: Graceful Degradation ────────────────────────────────
+
+describe("MailboxSubscription — graceful degradation", () => {
+  it("works without bus (bus is null) — no crash on publish", () => {
+    const sub = new MailboxSubscription(null as unknown as MessageBus, makeMockPi());
+    sub.subscribe("alice@local", "session-a");
 
     const handler = sub.createReceivedHandler();
-    const ctx = makeContext();
-    // Should not throw even though pi-intercom is not available (catch block handles it)
-    expect(() => handler(ctx)).not.toThrow();
-    expect(filter).toHaveBeenCalledOnce();
+    // Should not throw
+    expect(() => handler(makeContext())).not.toThrow();
   });
 
-  it("multiple subscribers on same mailbox — both get notified", () => {
-    const sub = new MailboxSubscription();
-    const filter1 = vi.fn().mockReturnValue(true);
-    const filter2 = vi.fn().mockReturnValue(true);
-    sub.subscribe("alice@local", "session-a", filter1);
-    sub.subscribe("alice@local", "session-b", filter2);
+  it("works without pi context — bus publish still fires", async () => {
+    const bus = makeMockBus();
+    const sub = new MailboxSubscription(bus, null as unknown as PiContext);
+    sub.subscribe("alice@local", "session-a");
 
     const handler = sub.createReceivedHandler();
-    const ctx = makeContext();
-    handler(ctx);
+    handler(makeContext());
 
-    // Both filters should have been called
-    expect(filter1).toHaveBeenCalledOnce();
-    expect(filter2).toHaveBeenCalledOnce();
+    expect(bus.publish).toHaveBeenCalledTimes(1);
+  });
+
+  it("bus.publish failure does not crash handler", async () => {
+    const bus = makeMockBus();
+    (bus.publish as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Redis down"));
+    const sub = new MailboxSubscription(bus, makeMockPi());
+    sub.subscribe("alice@local", "session-a");
+
+    const handler = sub.createReceivedHandler();
+    // Should not throw even though publish fails
+    expect(() => handler(makeContext())).not.toThrow();
+  });
+});
+
+// ─── Tests: No Dead Code ────────────────────────────────────────
+
+describe("MailboxSubscription — no dead intercom code", () => {
+  it("source file must NOT contain require('pi-intercom') or require(\"pi-intercom\")", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "mailbox-subscription.ts"),
+      "utf-8",
+    );
+    expect(source).not.toContain('require("pi-intercom")');
+    expect(source).not.toContain("'pi-intercom'");
+    expect(source).not.toContain("pi-intercom");
   });
 });

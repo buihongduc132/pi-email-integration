@@ -19,6 +19,7 @@ import { OriginTracker } from "../src/origin/tracker.js";
 import { RoutingEngine } from "../src/hooks/routing-engine.js";
 import { HookManager } from "../src/hooks/hook-manager.js";
 import { MailboxSubscription } from "../src/subscription/mailbox-subscription.js";
+import { createMessageBus } from "../src/pubsub/bus.js";
 import type { EmailConfig, EmailHookContext, EmailMessage } from "../src/types.js";
 
 const DEFAULT_CONFIG: EmailConfig = {
@@ -45,7 +46,8 @@ export default function (pi: ExtensionAPI): void {
   });
   const routingEngine = new RoutingEngine(config.hindsight);
   const hookManager = new HookManager();
-  const mailboxSub = new MailboxSubscription();
+  const bus = createMessageBus();
+  const mailboxSub = new MailboxSubscription(bus, pi);
 
   // Register subscription handler as a lifecycle hook
   hookManager.on("email:received", mailboxSub.createReceivedHandler());
