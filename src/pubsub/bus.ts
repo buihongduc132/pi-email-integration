@@ -11,7 +11,8 @@
  *   email:system           → system events (health, errors)
  */
 
-import Redis from "ioredis";
+import Ioredis from "ioredis";
+import type { Redis as RedisType } from "ioredis";
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -63,8 +64,8 @@ export function createMessageBus(options?: BusOptions): MessageBus {
   const prefix = options?.channelPrefix ?? "";
 
   // Lazy connections — only connect when first used
-  let publisher: Redis | null = null;
-  let subscriber: Redis | null = null;
+  let publisher: RedisType | null = null;
+  let subscriber: RedisType | null = null;
   let connected = false;
   let connectionError: string | null = null;
 
@@ -76,24 +77,26 @@ export function createMessageBus(options?: BusOptions): MessageBus {
     if (connectionError) return false;
 
     try {
-      publisher = new Redis(url, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      publisher = new (Ioredis as any)(url, {
         lazyConnect: true,
         maxRetriesPerRequest: 1,
         connectTimeout: 2000,
         retryStrategy: () => null, // No auto-retry
-      });
+      }) as RedisType;
 
-      subscriber = new Redis(url, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      subscriber = new (Ioredis as any)(url, {
         lazyConnect: true,
         maxRetriesPerRequest: null, // Subscriber needs persistent connection
         connectTimeout: 2000,
         retryStrategy: () => null,
-      });
+      }) as RedisType;
 
-      await Promise.all([publisher.connect(), subscriber.connect()]);
+      await Promise.all([publisher!.connect(), subscriber!.connect()]);
 
       // Set up message forwarding from subscriber to handlers
-      subscriber.on("message", (channel: string, message: string) => {
+      subscriber!.on("message", (channel: string, message: string) => {
         const handlers = handlerMap.get(channel);
         if (!handlers) return;
 
@@ -201,14 +204,14 @@ export function createMessageBus(options?: BusOptions): MessageBus {
 
       try {
         // Get all channels matching our prefix
-        const activeChannels = await publisher.pubsub("CHANNELS", prefix + "email:*");
+        const activeChannels = await publisher!.pubsub("CHANNELS", prefix + "email:") as unknown as string[];
         const result: ChannelInfo[] = [];
 
         for (const ch of activeChannels) {
-          const subs = await publisher.pubsub("NUMSUB", ch);
-          const count = (subs as [string, number])[1] ?? 0;
+          const subs = await publisher!.pubsub("NUMSUB", ch) as unknown as [string, number];
+          const count = subs[1] ?? 0;
           // Strip prefix for external consumption
-          const name = prefix ? ch.slice(prefix.length) : ch;
+          const name = prefix ? (ch as string).slice(prefix.length) : ch;
           result.push({ name, subscribers: count });
         }
 

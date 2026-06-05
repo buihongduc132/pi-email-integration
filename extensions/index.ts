@@ -271,6 +271,95 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
+  // ─── email_pub ────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "email_pub",
+    label: "Email Publish",
+    description: "Publish a message to an email bus channel. Used for cross-agent notification via Redis pub/sub.",
+    promptSnippet: "email_pub — publish to email bus channel",
+    parameters: {
+      type: "object",
+      properties: {
+        channel: { type: "string", description: "Channel name (e.g. email:inbox:alice@local, email:sent, email:system)" },
+        type: { type: "string", description: "Message type (e.g. email:received, email:system)" },
+        messageId: { type: "string", description: "Message ID" },
+        subject: { type: "string", description: "Subject" },
+        from: { type: "string", description: "Sender" },
+        body: { type: "string", description: "Body content" },
+      },
+      required: ["channel", "type", "messageId"],
+    },
+    async execute(_toolCallId, params) {
+      const payload = {
+        type: params.type as string,
+        messageId: params.messageId as string,
+        subject: (params.subject as string) || "",
+        from: (params.from as string) || "",
+        body: (params.body as string) || "",
+        origin: {},
+      };
+      const result = await bus.publish(params.channel as string, payload);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        details: result,
+      };
+    },
+  });
+
+  // ─── email_sub ────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "email_sub",
+    label: "Email Subscribe Channel",
+    description: "Subscribe to an email bus channel to receive messages injected into this session. Messages trigger a turn.",
+    promptSnippet: "email_sub — subscribe to email bus channel",
+    parameters: {
+      type: "object",
+      properties: {
+        channel: { type: "string", description: "Channel to subscribe to (e.g. email:sent, email:system)" },
+      },
+      required: ["channel"],
+    },
+    async execute(_toolCallId, params) {
+      const channel = params.channel as string;
+      const handler = (ch: string, payload: Record<string, unknown>) => {
+        try {
+          pi.sendMessage({
+            customType: "email_bus_message",
+            content: `📬 Bus message on ${ch}: ${JSON.stringify(payload).substring(0, 200)}`,
+            display: true,
+            details: { channel: ch, payload },
+          }, { triggerTurn: true });
+        } catch {
+          // Injection failed — graceful
+        }
+      };
+      await bus.subscribe(channel, handler);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ subscribed: true, channel }) }],
+        details: { subscribed: true, channel },
+      };
+    },
+  });
+
+  // ─── email_channels ────────────────────────────────────────
+
+  pi.registerTool({
+    name: "email_channels",
+    label: "Email Channels",
+    description: "List active email bus channels and their subscriber counts.",
+    promptSnippet: "email_channels — list active bus channels",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      const channels = await bus.channels();
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(channels) }],
+        details: { channels },
+      };
+    },
+  });
+
   // ─── email_health ────────────────────────────────────────────
 
   pi.registerTool({

@@ -174,6 +174,23 @@ export type EmailHookHandler = (
   ctx: EmailHookContext,
 ) => void | Promise<void>;
 
+// ─── Pub/Sub Types ───────────────────────────────────────────────
+
+export interface BusPayload {
+  type: string;
+  messageId: string;
+  subject: string;
+  from: string;
+  body: string;
+  origin: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface ChannelInfo {
+  name: string;
+  subscribers: number;
+}
+
 // ─── Configuration ──────────────────────────────────────────────
 
 export interface EmailConfig {

@@ -27,7 +27,7 @@ export interface PiContext {
   }, options?: {
     triggerTurn?: boolean;
     deliverAs?: "steer" | "followUp" | "nextTurn";
-  }) => Promise<void>;
+  }) => void | Promise<void>;
 }
 
 // ─── Formatting ─────────────────────────────────────────────────
