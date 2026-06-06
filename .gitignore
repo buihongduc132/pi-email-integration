@@ -21,3 +21,5 @@ sg-reports/
 # IDE
 .idea/
 .vscode/
+.fusion
+.pi
