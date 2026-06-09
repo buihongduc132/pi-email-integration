@@ -23,3 +23,5 @@ sg-reports/
 .vscode/
 .fusion
 .pi
+# Local Pi runtime state
+.atl/
