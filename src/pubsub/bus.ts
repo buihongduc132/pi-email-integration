@@ -95,6 +95,30 @@ export function createMessageBus(options?: BusOptions): MessageBus {
 
       await Promise.all([publisher!.connect(), subscriber!.connect()]);
 
+      // ─── Process-exit safety ────────────────────────────────────
+      // Unref the underlying TCP sockets so the Redis connections do NOT
+      // keep the Node event loop alive. Once any email tool publishes to
+      // the bus the connections stay open; without unref the ref'd socket
+      // strands the pi process after `agent_end` (false "silent active
+      // run" alerts). The bus still delivers messages while the session is
+      // live — unref only changes process-exit behavior, not delivery.
+      const unrefStream = (redis: RedisType | null): void => {
+        try {
+          // ioredis exposes the live net.Socket as `.stream` once connected.
+          const stream = (
+            redis as unknown as { stream?: { unref?: () => void } }
+          ).stream;
+          stream?.unref?.();
+        } catch {
+          // Best-effort: never let cleanup crash the bus.
+        }
+      };
+      unrefStream(publisher);
+      unrefStream(subscriber);
+      // Re-apply on every (re)connection so reconnects stay unref'd too.
+      publisher!.on("connect", () => unrefStream(publisher));
+      subscriber!.on("connect", () => unrefStream(subscriber));
+
       // Set up message forwarding from subscriber to handlers
       subscriber!.on("message", (channel: string, message: string) => {
         const handlers = handlerMap.get(channel);

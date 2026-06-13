@@ -52,6 +52,29 @@ export default function (pi: ExtensionAPI): void {
   // Register subscription handler as a lifecycle hook
   hookManager.on("email:received", mailboxSub.createReceivedHandler());
 
+  // ─── Session-end cleanup (process-exit + FD safety) ─────────
+  // Release the persistent SQLite handle and disconnect the bus when the
+  // extension runtime tears down (quit / reload / session replace). This is
+  // belt-and-suspenders alongside the bus `unref()` fix in bus.ts:
+  //   - the bus unref guarantees the process can drain even if this close
+  //     races or never runs;
+  //   - this close frees the SQLite file handle (AC: no persistent SQLite
+  //     handle past session end) and drops Redis sockets cleanly.
+  // Registered for `session_shutdown` (NOT `agent_end`) because `agent_end`
+  // fires after every turn and closing here would break multi-turn sessions.
+  pi.on("session_shutdown", () => {
+    try {
+      db.close();
+    } catch {
+      // Already closed or never opened — best-effort, never throw on cleanup.
+    }
+    bus
+      .close()
+      .catch(() => {
+        // Bus close failed — best-effort.
+      });
+  });
+
   function fireHook(ctx: EmailHookContext): void {
     hookManager.fire(ctx).catch((err) => {
       console.error("[pi-email-integration] hook fire error:", err);
