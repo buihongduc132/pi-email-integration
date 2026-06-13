@@ -20,6 +20,7 @@ import { RoutingEngine } from "../src/hooks/routing-engine.js";
 import { HookManager } from "../src/hooks/hook-manager.js";
 import { MailboxSubscription } from "../src/subscription/mailbox-subscription.js";
 import { createMessageBus } from "../src/pubsub/bus.js";
+import { scheduleForceExitIfNonDaemon } from "../src/pubsub/safety-net.js";
 import type { EmailConfig, EmailHookContext, EmailMessage } from "../src/types.js";
 
 const DEFAULT_CONFIG: EmailConfig = {
@@ -62,7 +63,7 @@ export default function (pi: ExtensionAPI): void {
   //     handle past session end) and drops Redis sockets cleanly.
   // Registered for `session_shutdown` (NOT `agent_end`) because `agent_end`
   // fires after every turn and closing here would break multi-turn sessions.
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (event, ctx) => {
     try {
       db.close();
     } catch {
@@ -73,6 +74,28 @@ export default function (pi: ExtensionAPI): void {
       .catch(() => {
         // Bus close failed — best-effort.
       });
+
+    // AC#3 — process-exit safety net (THE-716 / THE-703 / THE-712).
+    // The email-bus unref fix (THE-703) is necessary-but-not-sufficient:
+    // post-fix pi runs STILL strand via OTHER ref'd handles (epoll/io_uring,
+    // sockets, watchers) keeping the libuv loop alive past `agent_end`. This
+    // catch-all force-exits non-daemon runs after a grace period so NO
+    // single misbehaving extension can strand the runtime. Gated to
+    // single-shot modes and reason="quit" only (never interactive/rpc,
+    // never session replacement). See `src/pubsub/safety-net.ts` for full
+    // rationale.
+    //
+    // Mode detection is version-tolerant: deployed pi exposes `ctx.mode`
+    // ("tui"|"rpc"|"json"|"print"); the local type stub
+    // (@mariozechner/pi-coding-agent@0.73.1) does not, so we cast. When
+    // `mode` is absent we fall back to `hasUI===false` (true in single-shot
+    // print/json per prod pi), which the deployed runtime also carries.
+    const ctxMode = (ctx as unknown as { mode?: string }).mode;
+    const isNonDaemon =
+      ctxMode === "print" ||
+      ctxMode === "json" ||
+      (ctxMode === undefined && ctx.hasUI === false);
+    scheduleForceExitIfNonDaemon(isNonDaemon, event.reason);
   });
 
   function fireHook(ctx: EmailHookContext): void {
