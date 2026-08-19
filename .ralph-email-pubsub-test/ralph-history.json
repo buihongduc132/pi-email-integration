@@ -1,0 +1,23 @@
+{
+  "iterations": [
+    {
+      "iteration": 1,
+      "startedAt": "2026-06-05T19:50:18.183Z",
+      "endedAt": "2026-06-05T19:50:18.244Z",
+      "durationMs": 10,
+      "agent": "pi",
+      "model": "bhd-litellm/role-smart",
+      "toolsUsed": {},
+      "filesModified": [],
+      "exitCode": 1,
+      "completionDetected": false,
+      "errors": []
+    }
+  ],
+  "totalDurationMs": 10,
+  "struggleIndicators": {
+    "repeatedErrors": {},
+    "noProgressIterations": 1,
+    "shortIterations": 1
+  }
+}
